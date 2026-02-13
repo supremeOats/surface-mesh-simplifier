@@ -62,7 +62,7 @@ def new_pos(v1, v2, Q1, Q2) -> np.ndarray:
 def adjacent_faces(vert_index, mesh):
     return mesh.faces[vert_index]
 
-def quadratic_error(pair, Q1, Q2):
+def quadric_error(pair, Q1, Q2):
     v1 = np.append(pair[0], 1)
     v2 = np.append(pair[1], 1)
     
@@ -96,8 +96,8 @@ def q_matrix(vert_idx, mesh):
 
     return Q
 
-def edges_set(edges) -> np.ndarray:
-    ...
+# def edges_set(edges) -> np.ndarray:
+#     ...
 
 def update_heap(heap, edge, mesh):
     kept, killed = edge
@@ -120,19 +120,13 @@ def update_heap(heap, edge, mesh):
             pair = (mesh.vertices[v1], mesh.vertices[v2])
                                             # ^ index 330 is out of bounds for axis 0 with size 329
         
-            err = quadratic_error(pair, Q1, Q2)
+            err = quadric_error(pair, Q1, Q2)
 
-def simplify(mesh, target_size=100):
-    """
-    :param mesh: trimesh.base.Trimesh
-    :param target_size: percentage of the original size, 0-100
-    """
+def valid_edge(edge, mesh) -> bool:
+    return edge[0] != edge[1] and mesh.vertex_neighbors[edge[0]] and mesh.vertex_neighbors[edge[0]]
 
-    edges = edges_set(mesh.edges)
-
+def build_heap(mesh) -> list[tuple[float, tuple]]:
     heap = []
-
-    print("Calculating error...")
 
     for edge in mesh.edges:     # edge -> indices, pair -> positions
         Q1 = q_matrix(edge[0], mesh)
@@ -140,24 +134,48 @@ def simplify(mesh, target_size=100):
         
         pair = (mesh.vertices[edge[0]], mesh.vertices[edge[1]])
         
-        err = quadratic_error(pair, Q1, Q2)
+        err = quadric_error(pair, Q1, Q2)   # todo check
         heapq.heappush(heap, (err, tuple(edge)))   # when tuple given heapq sorts by the first value
-        
-    print("Heap built")
 
+    return heap
+
+def contract_edges(heap, mesh, target):
     total_size = len(heap)
     curr_size = total_size
+    
+    while heap and curr_size > total_size * target/100:
+        (err, curr_edge) = heap.pop()
+        
+        if not valid_edge(curr_edge, mesh):
+            continue
 
-    print("Simplifing...")
-
-    while heap and curr_size > total_size * target_size/100:
-        (_, curr_edge) = heap.pop()
         edge_collapse(curr_edge, mesh)
-        update_heap(heap, curr_edge, mesh)
+
+        for (v1,v2) in mesh.edges:
+            if v1 == curr_edge[0] or v2 == curr_edge[0]:
+                adj_edge = (v1,v2)
+            else: continue
+
+            Q1 = q_matrix(adj_edge[0], mesh)
+            Q2 = q_matrix(adj_edge[1], mesh)
+            cost = quadric_error(adj_edge, Q1, Q2)
+
+            heapq.heappush(heap, (cost, (adj_edge)))
 
         curr_size = len(heap)
-        percentage_done = round(curr_size / total_size * 100, 1)
-        if percentage_done % 10 == 2: print(f"{percentage_done}%...")
+
+def simplify(mesh, target_size=100):
+    """
+    :param mesh: trimesh.base.Trimesh
+    :param target_size: percentage of the original size, 0-100
+    """
+
+    print("Calculating error...")
+    heap = build_heap(mesh)        
+    print("Heap built")
+
+    print("Simplifing...")
+    contract_edges(heap, mesh, target_size)
 
     return mesh
 
