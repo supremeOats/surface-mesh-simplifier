@@ -4,7 +4,7 @@ import numpy as np
 from numpy.linalg import LinAlgError
 from numpy.typing import ArrayLike
 
-def edge_collapse(edge, mesh) -> None:
+def edge_collapse(edge, quadric, mesh) -> int:
     """
     :param edge: tuple of two indices of vertecies in the mesh
     :param mesh: mesh object
@@ -14,67 +14,74 @@ def edge_collapse(edge, mesh) -> None:
     faces = mesh.faces
     v_keep, v_kill = edge   # note: v_keep and v_kill are INDICES, not vertices
 
-    # print(f"v_keep: {vertices[v_keep]}")
-    # print(f"v_kill: {vertices[v_kill]}")
-
-    if (v_keep >= len(vertices) or v_kill >= len(vertices)
-            or any(vertices[v_keep]) == np.nan or any(vertices[v_kill]) == np.nan):
-        return None
-
     # new pos
-    new_coor = (vertices[v_keep] + vertices[v_kill]) * 0.5
-    vertices[v_keep] = new_coor
+    Q = quadric[v_keep] + quadric[v_kill]
+    mesh.vertices[v_keep] = new_pos(v_keep, v_kill, Q, vertices)[:3]
+    quadric[v_keep] += quadric[v_kill]
 
     # remove/replace v_kill
-    vert_to_keep = np.arange(len(vertices)) != v_kill
-
-    faces[faces == v_kill] = v_keep
+    mesh.faces[faces == v_kill] = v_keep
     vertices[v_kill] = np.nan
 
     # update mesh
     mesh.update_faces(mesh.nondegenerate_faces())
-    mesh.update_vertices(vert_to_keep)
 
-def new_pos(v1, v2, Q1, Q2) -> np.ndarray:
+    return v_keep
+
+def new_pos(v1, v2, Q, vertices) -> np.ndarray:
+    res = np.array(0.5 * (vertices[v1] + vertices[v2]))
+    return np.append(res, 1)
+
     """
-    Docstring for new_pos
+    Calculate optimal position for new vertex (minimal value of: v_TQv)
+    Q =[[q11 , q12, q13, b1],
+        [q12 , q22, q23, b2],
+        [q13 , q23, q33, b3],
+        [b1  ,  b2,  b3,  c]]
+        
+    Q =[[A,  b],
+        [bT, c]]
+
+    [x, y, z, 1] @ Q @ [x, y, z, 1]^T
+    p = [x, y, z]
     
-    :param v1: tuple of three floats
-    :param v2: tuple of three floats
-    :param Q1: Description
-    :param Q2: Description
-    :return: Description
-    :rtype: ndarray[_AnyShape, dtype[Any]]
+    A*p = -b
     """
-    
-    # try:
-    #     Q = Q1 + Q2
-    #     Q_inv = np.linalg.inv(Q)
-    # except LinAlgError:
-    #     #todo
-    #     return (v1+v2)*0.5
-    
-    # else:
-    #     return np.dot(Q_inv, np.array([0, 0, 0, 1]).T)
 
-    return (v1+v2)/2
+    A = Q[:3, :3]
+    b = Q[:3, 3]
 
+    candidates = []
+
+    try:
+        p = np.linalg.solve(A, -b)
+        candidates.append(p)
+    except np.linalg.LinAlgError:
+        pass
+
+    pu = vertices[v1]
+    pv = vertices[v2]
+    pm = 0.5 * (pu + pv)
+
+    candidates.extend([pu, pv, pm])
+
+    def error(p):
+        ph = np.append(p, 1.0)
+        return ph.T @ Q @ ph
+
+    best = min(candidates, key=error)
+    return np.append(best, 1.0)
+    
 def adjacent_faces(vert_index, mesh):
     return mesh.faces[vert_index]
 
-def quadric_error(pair, Q1, Q2):
-    v1 = np.append(pair[0], 1)
-    v2 = np.append(pair[1], 1)
+def quadric_error(edge, Q, vertices):
+    (u, v) = edge
+    v_opt = new_pos(u, v, Q, vertices)  # returns [x,y,z,1]
+
+    return np.dot(np.dot(v_opt.T, Q), v_opt)
+    ...
     
-    v_hat = new_pos(v1, v2, Q1, Q2)
-
-    Q = Q1 + Q2
-
-    return np.dot(np.dot(   # v'(Q1 + Q2)v
-        v_hat.T, Q),
-        v_hat
-    ) 
-
 def k_matrix(face, vertices):
     v1, v2, v3 = vertices[face]
     norm_vec = np.cross(v2-v1, v3-v1)       # a,b,c
@@ -96,73 +103,70 @@ def q_matrix(vert_idx, mesh):
 
     return Q
 
-# def edges_set(edges) -> np.ndarray:
-#     ...
-
-def update_heap(heap, edge, mesh):
-    kept, killed = edge
-    
-    for entry in heap:
-        (err, (v1, v2)) = entry
-        
-        if v1 == killed or v2 == killed:
-            if v1 == killed and v2 == kept:
-                heap.remove(entry)
-            elif v1 == killed:
-                v1 = kept
-            else:
-                v2 = kept
-
-            Q1 = q_matrix(edge[0], mesh)
-            Q2 = q_matrix(edge[1], mesh)
-        
-            # todo - goes out of bounds; debug
-            pair = (mesh.vertices[v1], mesh.vertices[v2])
-                                            # ^ index 330 is out of bounds for axis 0 with size 329
-        
-            err = quadric_error(pair, Q1, Q2)
-
 def valid_edge(edge, mesh) -> bool:
-    return edge[0] != edge[1] and mesh.vertex_neighbors[edge[0]] and mesh.vertex_neighbors[edge[0]]
+    v0, v1 = edge
 
-def build_heap(mesh) -> list[tuple[float, tuple]]:
+    if v0 == v1:
+        return False
+
+    n = len(mesh.vertices)
+    if not (0 <= v0 < n and 0 <= v1 < n):
+        return False
+
+    if np.any(np.isnan(mesh.vertices[v0])) or np.any(np.isnan(mesh.vertices[v1])):
+        return False
+
+    if v1 not in mesh.vertex_neighbors[v0]:
+        return False
+
+    return True
+
+def vertices_error(mesh):
+    quadric = []
+
+    for idx in range(len(mesh.vertices)):
+        quadric.append(q_matrix(idx, mesh))
+
+    return quadric
+
+def update_neighbors(kept, neighbors, heap, quadrics, vertices):
+    for v in neighbors:
+        v1, v2 = min(v, kept), max(v, kept)
+        Q = quadrics[v1] + quadrics[v2]
+
+        cost = quadric_error((v1, v2), Q, vertices)
+
+        heapq.heappush(heap, (cost, (v1, v2)))
+
+def build_heap(quadric, mesh) -> list[tuple[float, tuple]]:
     heap = []
 
-    for edge in mesh.edges:     # edge -> indices, pair -> positions
-        Q1 = q_matrix(edge[0], mesh)
-        Q2 = q_matrix(edge[1], mesh)
-        
-        pair = (mesh.vertices[edge[0]], mesh.vertices[edge[1]])
-        
-        err = quadric_error(pair, Q1, Q2)   # todo check
-        heapq.heappush(heap, (err, tuple(edge)))   # when tuple given heapq sorts by the first value
+    for (u, v) in mesh.edges:
+        u, v = min(u, v), max(u, v)
 
+        Q = quadric[u] + quadric[v]
+        err = quadric_error((u, v), Q, mesh.vertices)
+
+        heapq.heappush(heap, (err, (u, v)))
+        
     return heap
 
-def contract_edges(heap, mesh, target):
-    total_size = len(heap)
-    curr_size = total_size
-    
-    while heap and curr_size > total_size * target/100:
-        (err, curr_edge) = heap.pop()
-        
+def contract_edges(heap, quadrics, mesh, target):
+    total_size = len(mesh.vertices)
+    alive_verts = total_size
+
+    while heap and alive_verts > total_size * target/100:
+        (err, curr_edge) = heapq.heappop(heap)
+
         if not valid_edge(curr_edge, mesh):
             continue
 
-        edge_collapse(curr_edge, mesh)
-
-        for (v1,v2) in mesh.edges:
-            if v1 == curr_edge[0] or v2 == curr_edge[0]:
-                adj_edge = (v1,v2)
-            else: continue
-
-            Q1 = q_matrix(adj_edge[0], mesh)
-            Q2 = q_matrix(adj_edge[1], mesh)
-            cost = quadric_error(adj_edge, Q1, Q2)
-
-            heapq.heappush(heap, (cost, (adj_edge)))
-
-        curr_size = len(heap)
+        kept = edge_collapse(curr_edge, quadrics, mesh)
+        update_neighbors(kept, mesh.vertex_neighbors[kept], heap, quadrics, mesh.vertices)
+        
+        alive_verts -= 1
+        
+    print(f"Curr: {alive_verts}\nTotal: {total_size}\nReduced: {total_size * target/100}")
 
 def simplify(mesh, target_size=100):
     """
@@ -171,11 +175,13 @@ def simplify(mesh, target_size=100):
     """
 
     print("Calculating error...")
-    heap = build_heap(mesh)        
-    print("Heap built")
+    weighted_vertices = vertices_error(mesh)
+    
+    print(f"Building heap...")
+    heap = build_heap(weighted_vertices, mesh)
 
-    print("Simplifing...")
-    contract_edges(heap, mesh, target_size)
+    print("Contracting edges...")
+    contract_edges(heap, weighted_vertices, mesh, target_size)
 
     return mesh
 
